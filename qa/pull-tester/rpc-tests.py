@@ -181,6 +181,7 @@ testScripts = [
     'getmocktime.py',
     'uptime.py',
     'rpcstringamounts.py',
+    'unrecognisedargs.py',
     'p2p-getdata.py',
 ]
 if ENABLE_ZMQ:
