@@ -91,6 +91,9 @@ Notes that will save you time:
   nodes never sync and you get a "Block sync ... timed out" failure.
 - The RPC proxy parses JSON numbers as `decimal.Decimal` and leaves JSON strings as `str`, so the *wire type* of a
   value is observable as its Python type.
+- Adding a new test file to `src/Makefile.test.include` is not enough on its own: the generated `src/Makefile` is
+  stale until `automake src/Makefile && ./config.status src/Makefile` runs, and until then the new suite silently
+  does not exist. `make` reports success and the test binary simply does not contain it.
 - Several older tests import `asyncore` via `test_framework/mininode.py`, which was removed in Python 3.12. Those
   tests fail at import on a modern interpreter regardless of your change; confirm against a clean tree before
   assuming you broke something.
@@ -132,6 +135,33 @@ and construct `OptionsModel` normally.
 User-visible strings go through `tr()` or live in the `.ui`; both are extracted for translation. Do not hard-code
 a string in a `.ui` when its wording depends on another setting — set it from code and update it on that
 setting's change signal, or translators get a sentence that is only true half the time.
+
+## Block versions and AuxPoW
+
+`nVersion` is not a plain integer here. `CPureBlockHeader` splits it three ways:
+
+| bits  | meaning                                                       |
+|-------|---------------------------------------------------------------|
+| 31-16 | merge-mining chain ID — `0x0062` on every network             |
+| 8     | `VERSION_AUXPOW`, set when the block carries an auxpow         |
+| 7-0   | base version, what BIP34/66/65 compare against                 |
+
+A mainnet block is therefore `0x00620004`, and `GetBaseVersion()` is `nVersion % 256`. Comparing `nVersion`
+directly against 2/3/4 the way upstream Bitcoin Core does is wrong here; use `GetBaseVersion()`. `GetChainId()` is
+`nVersion >> 16` and is compared for equality against `nAuxpowChainId`, not masked.
+
+This layout collides head-on with BIP9, which puts `001` in the top three bits and hands bits 0-28 to soft-fork
+deployments. Read as AuxPoW, a BIP9 version has chain ID `0x2000` and base version `0`, so a block carrying one is
+rejected outright. Consequences worth knowing before touching anything version-related:
+
+- `ComputeBlockVersion()` is deliberately commented out in `CreateNewBlock()` behind a FIXME. It is not an
+  oversight and uncommenting it produces blocks this chain rejects.
+- Versionbits signalling always counts zero, because a well-formed Dogecoin block never matches
+  `VERSIONBITS_TOP_BITS`. Soft-forks cannot currently be deployed by BIP9 here.
+- Bit 8 can never be used by a deployment: it is the auxpow flag, so every signalling block would claim an auxpow
+  it does not carry.
+
+Issue #1340 tracks reconciling the two. It is parked, and the fork it describes is a maintainer decision.
 
 ## Conventions
 
