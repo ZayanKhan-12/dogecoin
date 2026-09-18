@@ -268,10 +268,15 @@ BOOST_AUTO_TEST_CASE(coin_selection_tests)
         add_coin(CWallet::GetMinChange() * 1);
         add_coin(CWallet::GetMinChange() * 100);
 
-        // trying to make 100.01 from these three outputs
+        // trying to make 100.01 from these three outputs: the 100 and the 0.05
+        // cover it while overshooting by less than a change output would cost,
+        // so they are taken on their own and the 1 is left where it is
         BOOST_CHECK(wallet.SelectCoinsMinConf(CWallet::GetMinChange() * 10001 / 100, 1, 1, 0, vCoins, setCoinsRet, nValueRet));
-        BOOST_CHECK_EQUAL(nValueRet, CWallet::GetMinChange() * 10105 / 100); // we should get all outputs
-        BOOST_CHECK_EQUAL(setCoinsRet.size(), 3U);
+        BOOST_CHECK_EQUAL(nValueRet, CWallet::GetMinChange() * 10005 / 100);
+        BOOST_CHECK_EQUAL(setCoinsRet.size(), 2U);
+        // and the overshoot stays small enough to be paid to the miner instead
+        // of coming back as the change output it was meant to avoid
+        BOOST_CHECK(nValueRet - CWallet::GetMinChange() * 10001 / 100 < CWallet::discardThreshold);
 
         // but if we try to make 99.9, we should take the bigger of the two small outputs to avoid small change
         BOOST_CHECK(wallet.SelectCoinsMinConf(CWallet::GetMinChange() * 9990 / 100, 1, 1, 0, vCoins, setCoinsRet, nValueRet));
@@ -475,6 +480,50 @@ BOOST_AUTO_TEST_CASE(bnb_search_test)
     for (int i = 0; i < 2000; i++)
         vMany.push_back((3 + i) * COIN);
     bnb_select(vMany, 2000017 * COIN, 0, vSelected);
+}
+
+BOOST_AUTO_TEST_CASE(changeless_coin_selection_test)
+{
+    CoinSet setCoinsRet;
+    CAmount nValueRet;
+
+    LOCK(wallet.cs_wallet);
+
+    // The price coin selection is willing to pay to avoid a change output has
+    // to stay under the discard threshold, because that is what makes
+    // CreateTransaction absorb the overshoot into the fee instead of handing it
+    // back as the change output we set out to avoid.
+    BOOST_CHECK(CWallet::GetCostOfChange() > 0);
+    BOOST_CHECK(CWallet::GetCostOfChange() < CWallet::discardThreshold);
+
+    empty_wallet();
+
+    // 20 outputs worth distinct powers of two, so that each target has exactly
+    // one combination adding up to it, and the overshoot tolerance is far
+    // smaller than the smallest output and so cannot admit another
+    for (int i = 0; i < 20; i++)
+        add_coin(((CAmount)1 << i) * COIN);
+
+    const CAmount nTarget = 123456 * COIN;
+
+    // repeated because SelectCoinsMinConf shuffles the outputs it is handed
+    for (int i = 0; i < RUN_TESTS; i++)
+    {
+        // paid outright, so CreateTransaction is left with no change to return
+        // to the wallet as a new unspent output
+        BOOST_CHECK(wallet.SelectCoinsMinConf(nTarget, 1, 6, 0, vCoins, setCoinsRet, nValueRet));
+        BOOST_CHECK_EQUAL(nValueRet, nTarget);
+        BOOST_CHECK_EQUAL(setCoinsRet.size(), 6U);
+
+        // a target the outputs cannot add up to exactly is still paid without
+        // change, by overshooting within what a change output would have cost
+        const CAmount nTargetOdd = nTarget - CWallet::GetCostOfChange() / 2;
+        BOOST_CHECK(wallet.SelectCoinsMinConf(nTargetOdd, 1, 6, 0, vCoins, setCoinsRet, nValueRet));
+        BOOST_CHECK(nValueRet >= nTargetOdd);
+        BOOST_CHECK(nValueRet - nTargetOdd < CWallet::discardThreshold);
+    }
+
+    empty_wallet();
 }
 
 BOOST_FIXTURE_TEST_CASE(rescan, TestChain240Setup)
