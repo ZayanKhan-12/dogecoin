@@ -96,7 +96,18 @@ Notes that will save you time:
   does not exist. `make` reports success and the test binary simply does not contain it.
 - Several older tests import `asyncore` via `test_framework/mininode.py`, which was removed in Python 3.12. Those
   tests fail at import on a modern interpreter regardless of your change; confirm against a clean tree before
-  assuming you broke something.
+  assuming you broke something. The auxpow tests need the `ltc_scrypt` module and fail the same way without it.
+  Between them that is around 25 of the tests `rpc-tests.py` runs, so a large block of red on a modern host is
+  expected rather than alarming — check that every failure is a `ModuleNotFoundError` at import, and treat any
+  failure that is *not* one as yours.
+- `rpc-tests.py --coverage` reports a method as uncovered when no test *called* it, which includes every method
+  whose only test died at import. On a host missing `asyncore` it will claim `getconnectioncount` and
+  `getmininginfo` are uncovered when `setmaxconnections.py` and `p2p-versionbits-warning.py` cover them. To tell a
+  genuine gap from a skipped test, grep for a call site (`\.methodname(`) as well.
+- A test whose nodes all run with `-prune` cannot sync them. A pruned node does not advertise `NODE_NETWORK`, so it
+  is never a preferred download peer, and `sync_all()` after a `generate()` times out. `blockchain.py` is like
+  this: its `setup_network` calls `sync_all()` only while the pair is already at the same height, which succeeds
+  trivially. Ask everything of the node that mined, or give a test that genuinely needs to sync an unpruned node.
 
 ## Money and precision
 
@@ -112,6 +123,31 @@ satoshi.
 `ValueFromAmount` in `src/rpc/server.cpp` therefore formats amounts as exact decimal text rather than emitting a
 double, and `AmountFromValue` parses with `ParseFixedPoint`, accepting both JSON numbers and JSON strings. Keep
 both properties when touching that code.
+
+## Wallet change and fees
+
+Two thresholds decide whether a transaction gets a change output, and they are not the same number:
+
+- `CWallet::discardThreshold` (`-discardthreshold`, default 0.01 DOGE) is the point below which `CreateTransaction`
+  **absorbs leftover value into the fee** rather than creating the output: `if (newTxOut.IsDust(discardThreshold))`
+  then `nFeeRet += nChange` and there is no change output. It is validated at startup to be at least the hard dust
+  limit, so it is never zero.
+- `CWallet::GetMinChange()` is `discardThreshold + minTxFee.GetFeePerK() * MIN_CHANGE_FEE_MULTIPLIER`, a larger
+  number that coin selection uses to decide which outputs are worth considering and to steer away from leaving
+  awkwardly small change.
+
+So a "no change output" outcome depends on `discardThreshold`, not on `GetMinChange()`, and code that wants to
+guarantee no change output has to stay under the former. `src/qt/coincontroldialog.cpp` and the fee-bumping path
+both read these, so a change to either one has reach beyond `wallet.cpp`.
+
+`CreateTransaction` is a loop: it selects coins for `nValue + nFeeRet`, sizes the transaction, and goes round again
+with a larger `nFeeRet` until the fee covers the size. Anything that changes which coins are selected changes the
+transaction's size and therefore feeds back into the next iteration, so verify such a change through
+`CreateTransaction` (`wallet.py`, `fundrawtransaction.py`) and not only through `SelectCoins*` in isolation.
+
+`ApproximateBestSubset` is randomised, so the coin-selection unit tests repeat themselves `RUN_TESTS` times and
+some are allowed to fail a fraction of the time (`RANDOM_REPEATS`). A single green run of those tests means less
+than it looks; a single red one may be luck. Run them repeatedly before concluding either way.
 
 ## GUI options
 
